@@ -1932,9 +1932,9 @@ You can also **fork the repository**, experiment with the workflow, and adapt th
 
 ## 📬 Connect
 
-**GitHub:** `https://github.com/YOUR-USERNAME`  
-**LinkedIn:** `YOUR-LINKEDIN-URL`  
-**Email:** `YOUR-PROFESSIONAL-EMAIL`
+**GitHub:** `https://github.com/Ikram-Ul-Hassan`  
+**LinkedIn:** `(https://www.linkedin.com/in/ikram-ul-hassan/)`  
+**Email:** `ikramautomations@gmail.com`
 
 ---
 
