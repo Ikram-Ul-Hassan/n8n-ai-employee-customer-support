@@ -1,0 +1,719 @@
+{
+  "name": "AI Customer Support Employee - Gmail, OpenAI, Google Sheets, Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "q": "is:unread -from:me subject:\"[AI SUPPORT TEST]\""
+        }
+      },
+      "id": "8d9b83c4-264a-432e-8689-db63846021f8",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        960,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Webhook input is inside $json.body.\n// Gmail Trigger input is directly inside $json.\nconst input =\n  $json.body &&\n  typeof $json.body === 'object' &&\n  !Array.isArray($json.body)\n    ? $json.body\n    : $json;\n\nconst h = input.headers || {};\n\nconst getHeader = (name) => {\n  const directValue =\n    input[name] ??\n    input[name.toLowerCase()] ??\n    input[name.toUpperCase()];\n\n  if (directValue) {\n    return directValue;\n  }\n\n  const found = Object.entries(h).find(\n    ([key]) => key.toLowerCase() === name.toLowerCase()\n  );\n\n  return found ? found[1] : '';\n};\n\nconst fromRaw = String(\n  input.From ||\n  input.from ||\n  getHeader('From') ||\n  ''\n);\n\nconst subject = String(\n  input.Subject ||\n  input.subject ||\n  getHeader('Subject') ||\n  ''\n);\n\nconst emailMatch =\n  fromRaw.match(/<([^>]+)>/) ||\n  fromRaw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\n\nconst customerEmail = emailMatch\n  ? emailMatch[1] || emailMatch[0]\n  : '';\n\nconst customerName = fromRaw\n  .replace(/<[^>]+>/, '')\n  .replace(/[\"']/g, '')\n  .trim();\n\nconst emailBody =\n  input.textPlain ||\n  input.text ||\n  input.snippet ||\n  input.email_body ||\n  '';\n\nreturn [\n  {\n    json: {\n      message_id:\n        input.id ||\n        input.messageId ||\n        input.message_id ||\n        '',\n      thread_id:\n        input.threadId ||\n        input.thread_id ||\n        '',\n      customer_email: customerEmail.trim(),\n      customer_name: customerName,\n      subject: subject.trim(),\n      email_body: String(emailBody).trim(),\n      received_at:\n        input.received_at ||\n        new Date().toISOString(),\n      source: $json.body ? 'Postman Webhook' : 'Gmail'\n    }\n  }\n];"
+      },
+      "id": "4c6482ce-8200-4295-8701-0c9aa279327f",
+      "name": "Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Extract Deterministic Fields').first().json;\n\n// Read Gemini's actual nested response format\nlet ai =\n  $json.content?.parts?.[0]?.text ??\n  $json.message?.content ??\n  $json.output ??\n  $json.text ??\n  $json.response ??\n  $json;\n\n// Parse JSON string returned by Gemini\nif (typeof ai === 'string') {\n  const cleaned = ai\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/```$/i, '')\n    .trim();\n\n  try {\n    ai = JSON.parse(cleaned);\n  } catch (error) {\n    ai = null;\n  }\n}\n\n// Safe fallback when Gemini output cannot be parsed\nif (\n  !ai ||\n  typeof ai !== 'object' ||\n  Array.isArray(ai) ||\n  !ai.category\n) {\n  return [\n    {\n      json: {\n        ...src,\n        category: 'general_support',\n        priority: 'normal',\n        sentiment: 'neutral',\n        order_number: src.extracted_order_number || '',\n        confidence: 0,\n        escalate: true,\n        summary: 'Gemini response could not be parsed',\n        draft_reply:\n          'Thanks for contacting us. A support team member will review your message shortly.',\n        raw_ai_output: $json\n      }\n    }\n  ];\n}\n\n// Normalize allowed values\nconst allowedCategories = [\n  'order_status',\n  'refund_request',\n  'damaged_item',\n  'cancellation',\n  'product_question',\n  'complaint',\n  'spam',\n  'general_support'\n];\n\nconst allowedPriorities = [\n  'low',\n  'normal',\n  'high',\n  'urgent'\n];\n\nconst category = String(\n  ai.category || 'general_support'\n).trim().toLowerCase();\n\nconst priority = String(\n  ai.priority || 'normal'\n).trim().toLowerCase();\n\nconst sentiment = String(\n  ai.sentiment || 'neutral'\n).trim().toLowerCase();\n\nlet confidence = Number(ai.confidence ?? 0);\n\nif (!Number.isFinite(confidence)) {\n  confidence = 0;\n}\n\nconfidence = Math.max(0, Math.min(1, confidence));\n\nreturn [\n  {\n    json: {\n      ...src,\n\n      category: allowedCategories.includes(category)\n        ? category\n        : 'general_support',\n\n      priority: allowedPriorities.includes(priority)\n        ? priority\n        : 'normal',\n\n      sentiment: ['positive', 'neutral', 'negative'].includes(sentiment)\n        ? sentiment\n        : 'neutral',\n\n      // Regex result is the only source of truth\n      order_number: String(\n        src.extracted_order_number || ''\n      ).trim(),\n\n      confidence,\n\n      escalate:\n        ai.escalate === true ||\n        String(ai.escalate).toLowerCase() === 'true',\n\n      summary: String(\n        ai.summary || ''\n      ).trim(),\n\n      draft_reply: String(\n        ai.draft_reply || ''\n      ).trim(),\n\n      extracted_email: src.extracted_email || '',\n      extracted_phone: src.extracted_phone || '',\n      extracted_tracking_id: src.extracted_tracking_id || '',\n      extracted_quantity: src.extracted_quantity ?? '',\n      extracted_amount: src.extracted_amount || ''\n    }\n  }\n];"
+      },
+      "id": "13a6648e-271e-4cb4-a441-11a6ba5d4ae4",
+      "name": "Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "order-status-check",
+              "leftValue": "={{ $json.category }}",
+              "rightValue": "order_status",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "order-number-check",
+              "leftValue": "={{ $json.order_number }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e8b3ad8c-6bc8-4264-9126-3af6a5bc1867",
+      "name": "Order Lookup Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2064,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_ORDERS_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "orders",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "30909ad4-c2f2-4279-96af-b4ad7154c06a",
+      "name": "Read Orders Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2304,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticket = $('Parse AI Result').first().json;\nconst orderNo = String(ticket.order_number || '').trim().toLowerCase();\nconst rows = $input.all().map(i => i.json);\nconst customerEmail = String(ticket.customer_email || '').trim().toLowerCase();\n\nconst order = rows.find(r => {\n  const rowOrder = String(\n    r['Order Number'] ?? r.order_number ?? r.OrderID ?? ''\n  ).trim().toLowerCase();\n\n  const rowEmail = String(\n    r['Customer Email'] ?? r.customer_email ?? ''\n  ).trim().toLowerCase();\n\n  return rowOrder === orderNo && rowEmail === customerEmail;\n});\nif (!order) {\n  return [{json:{...ticket,order_found:false,escalate:true,final_reply:`Thanks for reaching out. I couldn't verify order ${ticket.order_number} in our records, so I've forwarded this to our support team for review.`}}];\n}\nconst status = order.Status ?? order.status ?? 'Processing';\nconst tracking = order['Tracking Link'] ?? order.tracking_link ?? '';\nconst eta = order['Estimated Delivery'] ?? order.estimated_delivery ?? '';\nlet reply = `Thanks for reaching out. I checked order ${ticket.order_number}. Its current status is ${status}.`;\nif (eta) reply += ` The estimated delivery is ${eta}.`;\nif (tracking) reply += ` You can track it here: ${tracking}`;\nreply += ` Please reply to this email if you need any more help.`;\nreturn [{json:{...ticket,order_found:true,verified_order_status:status,tracking_link:tracking,estimated_delivery:eta,final_reply:reply,escalate:Boolean(ticket.escalate)}}];"
+      },
+      "id": "bdb1686b-fcd2-4f84-b6f9-890739b81c9f",
+      "name": "Find and Verify Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $json;\n\nconst confidence = Number(t.confidence || 0);\n\nconst lowConfidence = confidence < 0.75;\n\nconst riskyCategories = [\n  'refund_request',\n  'damaged_item',\n  'cancellation',\n  'complaint'\n];\n\nconst risky = riskyCategories.includes(t.category);\n\n// Order status request contains no order number\nconst missingOrderNumber =\n  t.category === 'order_status' &&\n  !String(t.order_number || '').trim();\n\n// Order lookup ran but no matching order was found\nconst orderNotFound =\n  t.category === 'order_status' &&\n  t.order_found === false;\n\nconst mustEscalate =\n  Boolean(t.escalate) ||\n  lowConfidence ||\n  risky ||\n  missingOrderNumber ||\n  orderNotFound;\n\nlet escalationReason = '';\n\nif (orderNotFound) {\n  escalationReason =\n    'The order number and customer email could not be verified.';\n} else if (missingOrderNumber) {\n  escalationReason =\n    'The customer requested an order update but did not provide an order number.';\n} else if (risky) {\n  escalationReason =\n    `The ${t.category} request requires human approval.`;\n} else if (lowConfidence) {\n  escalationReason =\n    `AI confidence was below the required threshold: ${confidence}.`;\n} else if (Boolean(t.escalate)) {\n  escalationReason =\n    t.summary || 'The AI marked this request for human review.';\n}\n\nconst finalReply =\n  t.final_reply ||\n  t.draft_reply ||\n  'Thanks for contacting us. A support team member will review your message shortly.';\n\nreturn [\n  {\n    json: {\n      ...t,\n      must_escalate: mustEscalate,\n      escalation_reason: escalationReason,\n      final_reply: finalReply,\n      status: mustEscalate\n        ? 'Escalated'\n        : 'Auto Replied',\n      processed_at: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "17b4a24f-5a18-4c94-8a8e-9433d5282298",
+      "name": "Apply Safety Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "escalation-check",
+              "leftValue": "={{ $json.must_escalate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "89f90cbe-1b35-47be-94f3-df21ec9d8be2",
+      "name": "Escalate to Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2992,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_SLACK_CHANNEL_ID"
+        },
+        "text": "=🚨 *Support escalation*\n*From:* {{ $json.customer_email }}\n*Subject:* {{ $json.subject }}\n*Category:* {{ $json.category }}\n*Priority:* {{ $json.priority }}\n*Sentiment:* {{ $json.sentiment }}\n*Confidence:* {{ $json.confidence }}\n*Order:* {{ $json.order_number || 'Not provided' }}\n*Summary:* {{ $json.summary }}\n\n*Suggested reply:*\n{{ $json.final_reply }}",
+        "otherOptions": {}
+      },
+      "id": "862ad4b8-b292-4fd6-b3f3-70e32f1b6cf0",
+      "name": "Notify Support Team in Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        3232,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "reply",
+        "messageId": "={{ $json.message_id }}",
+        "message": "={{ $json.final_reply }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "2a242f54-2d10-4c94-92ad-1b25390b5c25",
+      "name": "Send Safe Gmail Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3232,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('Apply Safety Rules').first().json;\n\nreturn [\n  {\n    json: {\n      'Ticket ID': source.message_id || '',\n      'Received At': source.received_at || '',\n      'Customer Name': source.customer_name || '',\n      'Customer Email': source.customer_email || '',\n      'Subject': source.subject || '',\n      'Message': source.email_body || '',\n      'Intent': source.category || '',\n      'Priority': source.priority || '',\n      'Order Number': source.order_number || '',\n      'Order Status': source.verified_order_status || '',\n      'AI Confidence': source.confidence ?? '',\n\n      'Action Taken': source.must_escalate\n        ? 'Human Escalation'\n        : 'Automatic Reply',\n\n      'Escalated': source.must_escalate\n        ? 'TRUE'\n        : 'FALSE',\n\n      'Escalation Reason': source.must_escalate\n        ? (\n            source.escalation_reason ||\n            source.summary ||\n            'Human review required'\n          )\n        : '',\n\n      'Reply Sent': source.must_escalate\n        ? 'FALSE'\n        : 'TRUE',\n\n      'Slack Notification Sent': source.must_escalate\n        ? 'TRUE'\n        : 'FALSE',\n\n      'Final Response': source.final_reply || '',\n      'Thread ID': source.thread_id || '',\n      'Status': source.status || '',\n      'Error Message': source.error_message || ''\n    }\n  }\n];"
+      },
+      "id": "038b5aa7-9130-45e4-bfe0-d96661bb427c",
+      "name": "Prepare Ticket Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3504,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_SUPPORT_LOG_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Support Logs",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Ticket ID",
+              "displayName": "Ticket ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Received At",
+              "displayName": "Received At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Customer Email",
+              "displayName": "Customer Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Subject",
+              "displayName": "Subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Message",
+              "displayName": "Message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Intent",
+              "displayName": "Intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Priority",
+              "displayName": "Priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Order Number",
+              "displayName": "Order Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Order Status",
+              "displayName": "Order Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "AI Confidence",
+              "displayName": "AI Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Action Taken",
+              "displayName": "Action Taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Escalated",
+              "displayName": "Escalated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Escalation Reason",
+              "displayName": "Escalation Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Reply Sent",
+              "displayName": "Reply Sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Slack Notification Sent",
+              "displayName": "Slack Notification Sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Final Response",
+              "displayName": "Final Response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Thread ID",
+              "displayName": "Thread ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Error Message",
+              "displayName": "Error Message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "99b27169-27e0-4491-abcd-13bb8fa4f64d",
+      "name": "Append Support Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        3744,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Setup before running\n1. Connect Gmail OAuth credentials to **Gmail Trigger** and **Send Safe Gmail Reply**.\n2. Connect Google Gemini credentials to **Message a model**.\n3. Connect Google Sheets credentials to **Read Orders Sheet** and **Append Support Log**.\n4. Replace `REPLACE_WITH_ORDERS_GOOGLE_SHEET_ID` in **Read Orders Sheet**.\n5. In that spreadsheet, create an `orders` sheet with columns: Order Number, Customer Email, Status, Estimated Delivery, Tracking Link.\n6. Replace `REPLACE_WITH_SUPPORT_LOG_GOOGLE_SHEET_ID` in **Append Support Log**.\n7. In that spreadsheet, create a `Support Logs` sheet using the headers produced by **Prepare Ticket Log**.\n8. Connect Slack credentials and replace `REPLACE_WITH_SLACK_CHANNEL_ID`.\n9. Test with a separate Gmail inbox before activating.\n\nSafety: refunds, cancellations, complaints, damaged items, low-confidence cases, missing order numbers, and unverified orders are escalated instead of being automatically resolved.",
+        "height": 530,
+        "width": 548,
+        "color": 5
+      },
+      "id": "d270c18b-05dd-40af-83c6-3a98a29c100e",
+      "name": "Setup Instructions",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        912,
+        -624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('Parse AI Result').first().json;\nreturn [{json:{...t,order_found:'',final_reply:t.draft_reply,processed_at:new Date().toISOString()}}];"
+      },
+      "id": "4a5b46a2-35c4-448c-aae2-f878814ae8fb",
+      "name": "Use AI Draft Without Lookup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=={{ `You are an AI customer support triage employee for an ecommerce business.\n\nAnalyze the customer email and classify the support request.\n\nAllowed categories:\n- order_status\n- refund_request\n- damaged_item\n- cancellation\n- product_question\n- complaint\n- spam\n- general_support\n\nAllowed priorities:\n- low\n- normal\n- high\n- urgent\n\nSet \"escalate\" to true for:\n- refund requests\n- cancellation requests\n- damaged products\n- angry or threatening messages\n- complaints\n- legal issues\n- payment disputes\n- low-confidence cases\n- requests requiring human approval\n\nImportant rules:\n- Never invent an order status.\n- Never invent delivery dates or tracking details.\n- Never approve refunds or cancellations.\n- Never promise an action that has not completed.\n- For an order-status request, classify it as order_status.\n- Keep the draft reply short, warm, and professional.\n\nReturn exactly this JSON object and nothing else:\n\n{\n  \"category\": \"\",\n  \"priority\": \"\",\n  \"sentiment\": \"positive|neutral|negative\",\n  \"confidence\": 0.0,\n  \"escalate\": false,\n  \"summary\": \"\",\n  \"draft_reply\": \"\"\n}\n\nSystem-extracted order number: ${$json.extracted_order_number || ''}\n\nCustomer Email: ${$json.customer_email || ''}\nSubject: ${$json.subject || ''}\nMessage: ${$json.email_body || ''}` }}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "builtInTools": {},
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        1536,
+        -64
+      ],
+      "id": "8d1351b0-22e5-40ae-97d1-d353544e61b0",
+      "name": "Message a model",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const subject = String($json.subject || '');\nconst body = String($json.email_body || '');\nconst fullText = `${subject}\\n${body}`;\n\n// Supports:\n// ORD-1002\n// ORD-TEST-101\n// ORD-US-2026-1001\nconst orderMatch = fullText.match(\n  /\\bORD(?:-[A-Z0-9]+)+\\b/i\n);\n\nconst emailMatch = fullText.match(\n  /\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/i\n);\n\nconst phoneMatch = fullText.match(\n  /(?:\\+?1[\\s.-]?)?(?:\\(\\d{3}\\)|\\d{3})[\\s.-]?\\d{3}[\\s.-]?\\d{4}\\b/\n);\n\nconst trackingMatch =\n  fullText.match(/\\b(?:TRK|TRACK)-[A-Z0-9-]+\\b/i) ||\n  fullText.match(/\\b1Z[A-Z0-9]{16}\\b/i);\n\nconst quantityMatch =\n  fullText.match(/\\bquantity\\s*[:\\-]?\\s*(\\d+)\\b/i) ||\n  fullText.match(/\\b(\\d+)\\s*(?:items?|units?|pieces?)\\b/i);\n\nconst amountMatch =\n  fullText.match(/\\$\\s?\\d+(?:\\.\\d{1,2})?/) ||\n  fullText.match(/\\b\\d+(?:\\.\\d{1,2})?\\s?USD\\b/i);\n\nreturn [\n  {\n    json: {\n      ...$json,\n\n      extracted_order_number: orderMatch\n        ? orderMatch[0].toUpperCase()\n        : '',\n\n      extracted_email: emailMatch\n        ? emailMatch[0].toLowerCase()\n        : '',\n\n      extracted_phone: phoneMatch\n        ? phoneMatch[0].trim()\n        : '',\n\n      extracted_tracking_id: trackingMatch\n        ? trackingMatch[0].toUpperCase()\n        : '',\n\n      extracted_quantity: quantityMatch\n        ? Number(quantityMatch[1])\n        : '',\n\n      extracted_amount: amountMatch\n        ? amountMatch[0].trim()\n        : ''\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        -64
+      ],
+      "id": "2d5147bd-c622-48b5-b598-738171368a32",
+      "name": "Extract Deterministic Fields"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Email": {
+      "main": [
+        [
+          {
+            "node": "Extract Deterministic Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Result": {
+      "main": [
+        [
+          {
+            "node": "Order Lookup Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Order Lookup Needed?": {
+      "main": [
+        [
+          {
+            "node": "Read Orders Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Use AI Draft Without Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Orders Sheet": {
+      "main": [
+        [
+          {
+            "node": "Find and Verify Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find and Verify Order": {
+      "main": [
+        [
+          {
+            "node": "Apply Safety Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use AI Draft Without Lookup": {
+      "main": [
+        [
+          {
+            "node": "Apply Safety Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Safety Rules": {
+      "main": [
+        [
+          {
+            "node": "Escalate to Human?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate to Human?": {
+      "main": [
+        [
+          {
+            "node": "Notify Support Team in Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Safe Gmail Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Support Team in Slack": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ticket Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Safe Gmail Reply": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ticket Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Ticket Log": {
+      "main": [
+        [
+          {
+            "node": "Append Support Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Deterministic Fields": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
